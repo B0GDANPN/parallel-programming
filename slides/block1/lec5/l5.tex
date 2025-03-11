@@ -1,0 +1,995 @@
+\input{../../common/slide-common-header.tex}
+\input{../../common/slide-plan.tex}
+
+\title[]{Lecture \extraBasicsNum: \extraBasicsTopic}
+\subtitle[]{\extraBasicsKey}
+\author[]{Alexander Filatov\\ filatovaur@gmail.com}
+
+\date{}
+
+
+\newcommand{\taskJCStress}{5.1}
+
+\begin{document}
+
+\begin{frame}
+  \titlepage
+  \url{https://github.com/Svazars/parallel-programming/blob/main/slides/pdf/l5.pdf}
+\end{frame}
+
+
+\begin{frame}{In previous episodes}
+
+Concurrent coordination concepts:
+\begin{itemize}
+    \item Mutual exclusion, Signalling, Group-level concurrency, Separation of threads and tasks
+\end{itemize}
+
+Concurrent data structures:
+\begin{itemize}
+    \item \texttt{Lock}, \texttt{Condition}, \texttt{Monitor}, \texttt{CountDownLatch}, \texttt{Semaphore}, \texttt{ReadWriteLock}
+\end{itemize}
+
+Key properties of concurrent algorithm:
+\begin{itemize}
+    \item Safety, Liveness, Performance
+\end{itemize}
+
+Common problems:
+\begin{itemize}
+    \item Safety: race condition, data race, deadlock, lost signal, predicate invalidation
+    \item Liveness: livelock, priority inversion, fairness  
+    \item Performance: lock convoy, thundering herd, oversubscription
+\end{itemize}
+
+Widely adopted concurrency designs that could complicate development:
+\begin{itemize}
+  \item Asynchronous exceptions, Cancellation/interruption, Timeouts
+\end{itemize}
+
+Decomposition ideas:
+\begin{itemize}
+  \item State machines, Partitioning, Ownership, Batching, Weakening
+\end{itemize}
+\end{frame}
+
+\newcommand{\painpointsslide}{
+\begin{frame}{Pain points}
+
+\begin{itemize}
+  \item Unpredicatable speed of execution
+  \item Arbitrary "whole program control flow"
+  \begin{itemize}
+    \item \texttt{Thread.start} looks like \texttt{goto}
+  \end{itemize}
+  \item Arbitrary "thread-specific control flow"
+  \begin{itemize}
+    \item timeout, notification, interruption, spurious wakeup
+  \end{itemize}
+
+  \item Limited composability of modules 
+  \begin{itemize}
+    \item locking policy is not clear
+    \item lock ordering hidden by virtual methods
+    \item exposed \texttt{synchronized}
+    \item non-documented thread-safety    
+  \end{itemize}
+
+  \item Hard to diagnose performance problems 
+  \begin{itemize}
+    \item livelock, priority inversion, thundering herd, scalability 
+  \end{itemize}
+
+  \item It is \textbf{too easy} to introduce a race condition
+  \begin{itemize}
+    \item it is \textbf{too hard} to find it on review, during testing, debug on production system
+  \end{itemize}
+\end{itemize}
+\end{frame}  
+}
+
+\painpointsslide
+
+\questiontime{Concurrency is a very complicated programming domain. What could we do to simplify our programming life?}
+
+
+\begin{frame}{Lecture plan}
+\tableofcontents
+\end{frame}
+
+
+\section{Public API}
+\showTOC
+
+\subsection{Documentation}
+
+\begin{frame}{Documentation}
+
+Reading \only<3->{and \textbf{writing}} the docs:
+\begin{itemize}
+  \item Thread-safety of a class
+  \item How to use class to avoid inconsistent state (e.g. \texttt{try-finally} for \texttt{Lock})
+  \item Blocking operations
+  \item Locking policy
+  \item Admission policy
+  \item Inheritance policy
+\end{itemize}
+
+\pause
+
+\only<2> {Writing the docs:}
+
+\pause
+\pause
+
+\texttt{java.util.concurrent} is a good source for inspiration
+
+\end{frame}
+
+\questiontime{Nobody reads the documentation! How could I \textvf{enforce} usage patterns of my precious class?}
+
+\subsection{Concurrent invariants}
+
+\begin{frame}[fragile]{Invariants checking}
+
+Single-threaded code crashes with \texttt{ConcurrentModificationException}\footnote{\tiny\url{https://stackoverflow.com/questions/3184883/concurrentmodificationexception-for-arraylist}}:
+
+\begin{minted}{java}
+void foo(List<X> list) {  
+  for (X x : list) {
+    if (!x.isValid()) list.remove(x);
+  }
+}
+\end{minted}
+
+\pause
+
+It is intended behaviour\footnote<2->{\tiny\url{https://docs.oracle.com/en/java/javase/11/docs/api/java.base/java/util/ArrayList.html}}
+\begin{quote}
+  The iterators returned by this class's `iterator` ... are fail-fast: if the list is structurally modified at any time after the iterator is created, in any way except through the iterator's own `remove` or `add` methods, the iterator will throw a `ConcurrentModificationException`. Thus, in the face of concurrent modification, the iterator fails quickly and cleanly, rather than risking arbitrary, non-deterministic behavior at an undetermined time in the future. 
+\end{quote}
+
+\end{frame}
+
+\questiontime{How to implement such consistency check (collection is not modified while iterator is used)?}
+
+\begin{frame}[fragile]{Invariants checking}
+
+Advantages:
+\begin{itemize}
+  \item Contract is enforced by implementation rather by javadoc
+  \item Fail-fast behaviour speed-ups debugging
+  \item Type of exception and stacktrace information help to debug large systems 
+\end{itemize}
+
+Disadvantages:
+\begin{itemize}
+  \item Performance overheads
+  \item Incompleteness (impossible to cover all misuses)
+  \item Affects even single-threaded programs
+\end{itemize}
+\end{frame}
+
+\questiontime{How could we implement lightweight or zero-cost checks?}
+
+
+\begin{frame}[fragile]{Assertions}
+
+Assertions\footnote{\tiny\url{https://docs.oracle.com/javase/specs/jls/se11/html/jls-14.html#jls-14.10}}:
+
+\begin{minted}{java}
+void foo(ArrayList<String> list) {
+  assert list != null;
+  assert list.size() > 0;
+}
+\end{minted}
+
+\pause
+
+\begin{quote}
+Typically, assertion checking is enabled during program development and testing, and disabled for deployment, to improve performance.
+\end{quote}
+
+\pause
+
+\begin{quote}
+Because assertions may be disabled, programs must not assume that the expressions contained in assertions will be evaluated. Thus, these boolean expressions should generally be free of side effects. 
+\end{quote}
+
+\pause
+
+\begin{quote}
+In light of this, assertions should not be used for argument checking in public methods. Argument checking is typically part of the contract of a method, and this contract must be upheld whether assertions are enabled or disabled.
+\end{quote}
+
+\end{frame}
+
+
+\begin{frame}[fragile]{Assertions}
+
+\begin{itemize}
+  \item Could be enabled/disabled without recompilation of Java program\footnote{\tiny\url{https://docs.oracle.com/javase/8/docs/technotes/guides/language/assert.html}}
+  \begin{itemize}
+    \item Many guidelines enforce \texttt{java -ea -esa -jar production.jar ...}
+  \end{itemize}
+
+  \item Should be used for checking \textbf{internal consistency} (violation of programmer's intent), not \textbf{external consistency} (e.g validation of user input)
+
+  \item Perfect choice to make concurrent programs fail-fast
+  \begin{itemize}
+    \item Use \texttt{-enablesystemassertions} to fail-fast on subtle data races inside improperly used classes from standard library (e.g. unsynchronized access to \texttt{ArrayList})
+  \end{itemize}
+\end{itemize}
+\end{frame}
+
+
+\begin{frame}[fragile]{Optional heavyweight checks}
+
+\begin{minted}{java}
+class MyLinkedList {
+  private int cachedLength;
+  private Node head;
+  private int length() {
+    int size = 0;
+    for (Node n = this.head; n != null; n = n.next, size++) {}
+    return size;
+  }
+  public void add(Node e) {
+    e.next = this.head;
+    this.head = e;
+    elementCount++;
+    assert cachedLength == length();
+  }
+}
+\end{minted}
+
+\end{frame}
+
+\begin{frame}[fragile,noframenumbering]{Optional heavyweight checks}
+
+\begin{minted}{java}
+class MyLinkedList {
+  private int cachedLength;
+  private Node head;
+  private int length() {
+    int size = 0;
+    for (Node n = this.head; n != null; n = n.next, size++) {}
+    return size;
+  }
+  public void add(Node e) {
+    e.next = this.head;
+    this.head = e;
+    elementCount++;
+    assert heavyChecksDisabled() || cachedLength == length();
+  }
+}
+\end{minted}
+\end{frame}
+
+
+\begin{frame}{Optional heavyweight checks}
+
+\begin{itemize}
+  \item Could find non-local data inconsistency
+  \item May be prohibitively slow for production workloads
+  \item Distort concurrent execution patterns (change probability of race condition)
+  \item May be designed to provide detailed information about failure
+\end{itemize}
+\end{frame}
+
+
+\begin{frame}{Summary: invariants}
+
+\begin{itemize}
+  \item Invariants help to make better contracts and design more reliable programs
+  \item Report failed external contracts with detailed exceptions
+  \item Check internal contracts with lightweight checks (e.g. optional \texttt{assert}s)
+  \item Consider using heavyweight checks for special modes of execution (e.g. debug builds)
+\end{itemize}
+
+\pause
+
+You can not start checking for correctness until you understand 
+\begin{itemize}
+  \item allowed
+  \item forbidden
+\end{itemize}
+result of your algorithm or data structure.
+
+\end{frame}
+
+
+\begin{frame}{Summary: concurrent invariants}
+
+Some validity rules are obvious and trivial:
+\begin{itemize}
+  \item Does not fail with \texttt{AssertionError}, \texttt{NullPointerExcepiton} ...
+  \item Deadlock never happens, data race never happens ...
+  \item ...
+\end{itemize}
+
+\pause
+
+Describing behaviour in multithreaded environment requires additional effort:
+\begin{itemize}
+  \item After data is \texttt{add}ed to thread-safe collection, some other thread eventually could \texttt{remove} it
+  \pause
+  \item only once
+\end{itemize}
+
+\pause
+
+Concurrent consistency could be hard to explain and check\footnote<4->{\tiny\url{https://en.wikipedia.org/wiki/Sequential_consistency}}:
+\begin{quote}
+  ... the result of any execution is the same as if the operations of all the processors were executed in some sequential order, and the operations of each individual processor appear in this sequence in the order specified by its program.
+\end{quote}
+
+\pause
+Lecture~\foundationsNum \ and Lecture~\foundationsPlusNum \ will heavily use complicated math to formalize \textit{consistency}.
+
+\end{frame}
+
+\section{Testing}
+\showTOC
+
+\subsection{Unit testing and stress testing}
+
+\begin{frame}{Unit testing}
+
+Focus on safety (correctness).
+
+\pause
+
+\begin{itemize}
+  \item All single-threaded scenarios
+  \item Basic multi-threaded scenarios
+  \item Advanced multi-threaded scenarios with custom scheduling (insertion of \texttt{Thread.sleep})
+\end{itemize}
+
+\pause
+Goals:
+\begin{itemize}
+  \item coverage
+  \item regression tests
+  \item supplementary documentation for intended and forbidden usages
+\end{itemize}
+
+\pause
+Tools:
+\begin{itemize}
+  \item JUnit\footnote<4->{\tiny\url{https://junit.org}} 
+  \item Java Concurrency Stress (jcstress)\footnote<4->{\tiny\url{https://github.com/openjdk/jcstress}}
+\end{itemize}
+
+\pause
+Caveats: 
+\begin{itemize}
+  \item there are few Quality Assurance (QA) engineers that are aware about concurrency pitfalls
+\end{itemize}
+
+\end{frame}
+
+
+\begin{frame}[fragile]{Homework: JCStress}
+
+Check out few solutions for Dining Philosophers Problem in JCStress repo\footnote{\tiny\url{https://github.com/openjdk/jcstress/blob/master/jcstress-samples/src/main/java/org/openjdk/jcstress/samples/problems/classic/Classic_01_DiningPhilosophers.java}}
+
+Checkout repo, run example. Modify example with some incorrect solution, observe deadlock and see how it is reported by the framework.
+
+\begin{homeworkmail}{Task \taskJCStress}
+  Send two screenshots: 
+  \begin{itemize}
+    \item incorrect solution to dining philosophers problem written in JCStress DSL
+    \item console output when you run this sample via JCStress harness
+  \end{itemize}
+}
+\end{homeworkmail}
+
+\end{frame}
+
+
+
+
+\begin{frame}[t]{Stress testing}
+
+Focus on performance (resource utilization).
+
+\pause
+
+\begin{itemize}
+  \item Undersubscription because of critical sections
+  \item Oversubscription because of misconfigured thread pools
+  \item Inefficient contended execution path
+  \item Progress problems (livelock, priority inversion, starvation)
+\end{itemize}
+
+\pause
+
+Key metrics:
+\begin{itemize}
+  \item Throughput
+  \item Latency distribution
+  \item Resource leaks (objects, thread-local memory, thread handles, caches ...)
+  \item Scalability
+\end{itemize}
+
+\end{frame}
+
+
+\begin{frame}[t,noframenumbering]{Stress testing}
+Focus on performance (resource utilization).
+
+Key metrics:
+\begin{itemize}
+  \item Throughput, Latency, Resource utilization, Scalability
+\end{itemize}
+
+\pause
+Tools:
+\begin{itemize}
+  \item Java Microbenchmark Harness (JMH)\footnote<2->{\tiny\url{https://github.com/openjdk/jmh}}
+  \item Lincheck\footnote<2->{\tiny\url{https://github.com/JetBrains/lincheck}}
+\end{itemize}
+
+\pause
+Caveats: 
+\begin{itemize}
+  \item high-quality performance analysis requires years of low-level expertise
+  \item "We should forget about small efficiencies, say about 97\% of the time: premature optimization is the root of all evil. Yet we should not pass up our opportunities in that critical 3\%"
+\end{itemize}
+\end{frame}
+
+
+\subsection{Execution trace analysis}
+\showTOCSub
+
+\begin{frame}[fragile]{Execution trace analysis: idea}
+
+\begin{verbatim}
+  Timestamp: 1000400, Thread A: X.lock   (success)
+  Timestamp: 1000405, Thread B: Y.lock   (success)
+  Timestamp: 1000408, Thread A: X.lock   (success)
+  Timestamp: 1000411, Thread B: X.lock   (block)
+  Timestamp: 1000415, Thread A: Y.lock   (block)
+\end{verbatim}
+
+\pause
+
+\textt{Thread A} owns \texttt{X}, awaits for \texttt{Y}
+
+\textt{Thread B} owns \texttt{Y}, awaits for \texttt{X}
+
+\end{frame}
+
+
+\begin{frame}[fragile]{Examples of nontrivial consistency}
+
+\begin{verbatim}
+  Timestamp: 1, Thread A: list.add(User(1))
+  Timestamp: 2, Thread B: list.add(User(2))
+  Timestamp: 3, Thread C: list.removeAny(), result = User(2)
+  Timestamp: 3, Thread D: list.removeAny(), result = null
+  Timestamp: 5, Thread A: list.removeAny(), result = User(2)
+\end{verbatim}
+
+\pause
+
+Where is \texttt{User(1)}?
+
+\pause
+
+Why \texttt{User(2)} was removed twice?
+
+\end{frame}
+
+\begin{frame}{Execution trace analysis}
+ 
+ \begin{itemize}
+   \item Use \textbf{monotonic} stamps\footnote{\tiny\texttt{CLOCK\_MONOTONIC} \url{https://linux.die.net/man/3/clock_gettime}}
+   \pause
+   \begin{itemize}
+     \item \texttt{System.currentTimeMillis()} is \textbf{not} monotonic, be ready to time travel\footnote<2->{\tiny\url{https://shipilev.net/blog/2014/nanotrusting-nanotime/}}
+
+     \pause
+     \item \texttt{static synchronized long stamp() \{ return ++counter; \}} is safe approximation
+   \end{itemize}
+ 
+   \pause
+ 
+   \item Define obvious consistency violations
+   \begin{itemize}
+     \item Thread-safe collection cannot return \texttt{null} in moment \texttt{t2} if element was added at \texttt{t1 < t2}
+     \item Thread-safe collection cannot remove the same element twice if it was added only once
+     \item ...
+   \end{itemize}
+ 
+   \pause
+   \item Collect execution trace (e.g. log file) from some scenario and check validity
+ 
+   \pause
+   \item You could implement simple "reference solution"\ and check that it provides the same result on given execution trace\footnote<6->{\tiny\url{https://www.amazon.science/publications/using-lightweight-formal-methods-to-validate-a-key-value-storage-node-in-amazon-s3}}
+ \end{itemize}
+ 
+\end{frame}
+
+\questiontime{How could I check that requirements for my data structure are complete, consistent, strong enough/weak enough?}
+
+\questiontime{How could I check that requirements for my data structure are complete, consistent, strong enough/weak enough? 
+
+Reconsider your answer after Lecture~\foundationsPlusNum.
+}
+
+\subsection{Test design to increase bug probability}
+\showTOCSub
+
+\begin{frame}{Common errors}
+
+\pause
+\begin{itemize}
+  \item Use delays (e.g. \texttt{Thread.sleep(100)}) to ensure that "other thread done something"
+  \begin{itemize}
+    \item use synchronized state variables, \texttt{CountDownLatch} or monitors
+  \end{itemize}
+
+  \pause
+  \item Use too strict assertions that trigger false-positive test failures
+  \begin{itemize}
+    \item formalize invariants, drop irrelevant constraints
+  \end{itemize}
+
+  \pause
+  \item Test scenarios are missing execution patterns so could not detect some race conditions
+  \begin{itemize}
+    \item use tests with custom scheduling and aim to 100\% coverage
+  \end{itemize}
+
+  \pause
+  \item Test scenarios are missing some essential consistency checks (e.g. because of mocking)
+  \begin{itemize}
+    \item enable some lightweight fail-fast checks on production system
+    \item validate execution trace from production system
+  \end{itemize}
+
+  \pause
+  \item Ignorance of tools
+  \begin{itemize}
+    \item use test generators (property testing, fuzzers, lincheck)
+    \item use properly designed concurrency stress systems (JMH, jcstress)
+    \item do not use tools that you do not understand \pause(ChatGPT may block your skill growth)
+  \end{itemize}
+
+  \pause
+  \item Obsessive perfectionism
+  \begin{itemize}
+    \item formalize QA criteria and limit investments into testing
+  \end{itemize}
+
+\end{itemize}
+\end{frame}
+
+
+\begin{frame}[fragile]{Common errors: sample v1}
+
+\begin{minted}{java}
+static int x = 0; static Object lock = new Object();
+void thread_1() {
+  synchronized(lock) {
+    assert x == 0;
+    lock.wait();
+    assert x == 1;
+  }
+}
+void thread_2() {
+  sleep(100); // allow thread_1 to grab lock
+  synchronized(lock) {
+    x++;
+    lock.notify();
+  }
+}
+\end{minted}
+\end{frame}
+
+\begin{frame}[fragile,noframenumbering]{Common errors: sample v2}
+
+\begin{minted}{java}
+static int x = 0; static Object lock = new Object();
+void thread_1() {
+  synchronized(lock) {
+    assert x == 0;
+    lock.wait();
+    assert x == 1;
+  }
+}
+void thread_2() {
+  // sleep(100);
+  synchronized(lock) {
+    x++;
+    lock.notify();
+  }
+}
+\end{minted}
+\end{frame}
+
+\begin{frame}[fragile,noframenumbering]{Common errors: sample v3}
+
+\begin{minted}{java}
+static int x = 0; static Object lock = new Object();
+void thread_1() {
+  synchronized(lock) {
+    // assert x == 0;
+    lock.wait();
+    assert x == 1;
+  }
+}
+void thread_2() {
+  // sleep(100);
+  synchronized(lock) {
+    x++;
+    lock.notify();
+  }
+}
+\end{minted}
+\end{frame}
+
+\begin{frame}[fragile,noframenumbering]{Common errors: sample v4}
+
+\begin{minted}{java}
+static int x = 0; static Object lock = new Object();
+void thread_1() {
+  synchronized(lock) {
+    // assert x == 0;
+    if (x == 0) lock.wait();
+    assert x == 1;
+  }
+}
+void thread_2() {
+  // sleep(100);
+  synchronized(lock) {
+    x++;
+    lock.notify();
+  }
+}
+\end{minted}
+\end{frame}
+
+\begin{frame}{Validation: required mindset}
+
+"Is parallel programming hard, and, if so, what can you do about it?" (a.k.a. perfbook)\footnote{\tiny\url{https://github.com/paulmckrcu/perfbook}}
+
+Chapter 11 "Validation":
+
+\pause
+
+\begin{itemize}
+  \item The only bug-free programs are trivial programs
+  \pause
+  \item A reliable program has no known bugs
+\end{itemize}
+
+\pause
+Conclusion: \pause any reliable non-trivial program contains at least one bug that you do not know about.
+
+\end{frame}
+
+\begin{frame}{Enough is enough: estimate bug probability}
+
+We will discuss the simplest discrete test scenario:
+\begin{itemize}
+  \item Individual test run either fails or successfully finishes\footnote{Continuous test example: run 1 minute under heavy contention, ensure no exception happen}
+\end{itemize}
+
+\pause
+Probability of single failure $f$ (e.g. $0.1$, 10\%)
+
+\pause
+Probability of single success  $1 - f$ (e.g. $0.9$, 90\%)
+
+\pause
+Probability n repeats will succeed $S_n=(1-f)^n$
+
+\pause
+Probability of failure $F_n=1-(1-f)^n$
+
+\pause
+"How many times should we run the test to cause the probability of failure to rise above 99\%?" \pause
+
+$$n=\frac{log(1-F_n)}{log(1-f)}$$
+
+\end{frame}
+
+
+\begin{frame}{Be careful. It is real world out there.}
+
+As of 2017 Linux kernel was estimated to have more than 20 billion instances running throughout the world.
+
+Bug that occurs once every million years on a single system will be encountered more than \pause 50 times per day.
+
+\pause
+
+Any mission-critical software for
+\begin{itemize}
+  \item health\footnote<3->{\tiny\url{https://en.wikipedia.org/wiki/Therac-25}}
+  \item aerospace\footnote<3->{\tiny\url{https://en.wikipedia.org/wiki/Ariane_flight_V88}}
+  \item military\footnote<3->{\tiny\url{https://devblogs.microsoft.com/oldnewthing/20180228-00/?p=98125}}
+\end{itemize}
+is also not satisfied with "just testing". We will talk a little bit about this problem at the very end of this Lecture.
+\end{frame}
+
+\section{Tooling}
+\showTOC
+
+\subsection{Static checks}
+
+\begin{frame}{Static code analysis}
+
+\begin{itemize}
+  \item Java FindBugs \url{https://findbugs.sourceforge.net}
+  \begin{itemize}
+    \item \url{https://findbugs.sourceforge.net/bugDescriptions.html}, search for "synchronized"\ or "concurrent"
+    \item "Finding Concurrency Bugs In Java" by David Hovemeyer and William Pugh\footnote{\tiny\url{https://www.cs.jhu.edu/~daveho/pubs/csjp2004.pdf}}
+  \end{itemize}
+
+  \item IneliJ IDEA inspections and analysis, interactive debugger\footnote{\tiny\url{https://www.jetbrains.com/help/idea/detect-concurrency-issues.html}}
+
+  \item "Java Concurrency in Practice" (JCIP) \url{https://jcip.net/annotations/doc/index.html}
+\end{itemize}
+
+\end{frame}
+
+\subsection{Dynamic checks}
+
+\begin{frame}{Dynamic checks}
+
+\begin{itemize}
+  \item Assertions
+  \item Configurable heavyweight checks
+  \item Configurable loggers and other dependency injection ideas
+  \item Using compile-time program rewriting\footnote{\tiny\url{https://en.wikipedia.org/wiki/Aspect-oriented_programming}}
+  \item Using run-time program transformation\footnote{\tiny\url{https://docs.oracle.com/en/java/javase/11/docs/api/java.instrument/java/lang/instrument/package-summary.html}}
+\end{itemize}
+
+\pause
+Other languages also support dynamic checks, popular term is "sanitizers"\ or "race detectors":
+\begin{itemize}
+  \item \url{https://valgrind.org}
+  \item \url{https://valgrind.org/docs/manual/hg-manual.html}
+  \item \url{https://go.dev/doc/articles/race_detector}
+  \item \url{https://docs.kernel.org/dev-tools/ubsan.html}
+  \item \url{https://clang.llvm.org/docs/AddressSanitizer.html}
+\end{itemize}
+\end{frame}
+
+
+\subsection{Monitoring}
+
+\begin{frame}{Monitoring}
+
+\begin{itemize}
+  \item \url{https://docs.oracle.com/en/java/javase/11/tools/jstack.html}
+  \item \url{https://docs.oracle.com/en/java/javase/11/tools/jmap.html}
+  \item \url{https://docs.oracle.com/en/java/javase/11/tools/jcmd.html}
+  \item \url{https://eclipse.dev/mat}
+  \item \url{https://axiomjdk.ru/announcements/2024/10/22/jdk-flight-recorder}
+  \item infinite number of commercial tools
+\end{itemize}
+
+\pause
+
+Using \texttt{ThreadFactories} and \texttt{Executors} allows you to debug component-by-component
+\begin{itemize}
+  \item Inefficient but correct implementation
+  \item Implementation with extensive logging
+\end{itemize}
+
+\end{frame}
+
+\subsection{Chaos mode execution}
+\showTOCSub
+
+\painpointsslide
+
+\begin{frame}[t]{Need for speed}
+
+\begin{itemize}
+  \item Unpredicatable speed of execution
+\end{itemize}
+
+\pause
+
+\begin{itemize}
+  \item Hard to detect bugs
+  \item Hard to reproduce problems
+  \item Hard to verify issue is fixed
+\end{itemize}
+
+\end{frame}  
+
+\questiontime{Could we change timings of multi-threaded program?}
+
+\begin{frame}{Scheduling control: language level}
+
+Custom scheduling using language primitives:
+\begin{itemize}
+  \item Arbitrary \texttt{Thread.sleep} here and there
+  \begin{itemize}
+    \item Dependency injection/inheritance/interfaces
+    \item AspectJ
+    \item Java agents and bytecode transformers
+  \end{itemize}
+  
+  \pause
+
+  \item Guided insertion of randomized delay for synchronization operations
+  \begin{itemize}
+    \item Efficient Scalable Thread-Safety-Violation Detection\footnote<2->{\tiny\url{https://rohan.padhye.org/files/tsvd-sosp19.pdf}}
+  \end{itemize}
+
+  \pause
+
+  \item Analysis of communication points (memory locations)
+  \begin{itemize}
+    \item Snowboard: Finding Kernel Concurrency Bugs through Systematic Inter-thread Communication Analysis\footnote<3->{\tiny\url{https://sishuaigong.github.io/pdf/sosp21-snowboard.pdf}}
+  \end{itemize}
+\end{itemize}
+\end{frame}
+
+\questiontime{Who controls \textbf{all} timings of multi-threaded program?}
+
+\begin{frame}{Scheduling control: OS level}
+
+OS scheduler:
+\begin{itemize}
+  \item Scheduling policy (round-robin, shortest remaining time ...)
+  \item Thread priorities, Scheduling quantum, Context switch, Fairness, Real-time
+\end{itemize}
+
+\pause
+
+Pinning/affinity\footnote<2->{\tiny\url{https://en.wikipedia.org/wiki/Processor_affinity}}:
+\begin{itemize}
+  \item \texttt{Thread A} could be executed only by \texttt{Processor 1} or \texttt{Processor 7}
+  \item \texttt{taskset}\footnote<2->{\tiny\url{https://man7.org/linux/man-pages/man1/taskset.1.html}}, \texttt{numactl}\footnote<2->{\tiny\url{https://linux.die.net/man/8/numactl}}
+\end{itemize}
+
+\pause
+
+Replace/record OS scheduling decisions to enable deterministic execution:
+\begin{itemize}
+  \item Reproducible container\footnote<3->{\tiny\url{https://github.com/facebookexperimental/hermit}}
+  \item Lightweight record-replay\footnote<3->{\tiny\url{https://rr-project.org/}}
+  \item Time-travel debugging\footnote<3->{\tiny\url{https://en.wikipedia.org/wiki/Time_travel_debugging}}
+\end{itemize}
+
+\end{frame}
+
+
+\begin{frame}{Chaos mode}
+
+\begin{itemize}
+  \item Multi-threaded program executed by single processor (pre-emptive multitasking)
+  \item Every scheduling decision is
+  \begin{itemize}
+    \item Reproducible 
+    \item Customizable -- pseudo-random with some seed
+  \end{itemize}
+\end{itemize}
+
+\pause
+Advantages:
+\begin{itemize}
+  \item Helps to find/reproduce race conditions, data races, deadlocks
+\end{itemize}
+
+\pause
+Disadvantages:
+\begin{itemize}
+  \item Subtle concurrency problems (word tearing, visibility) are not detected
+  \item Heuristic search of "interesting"\ scheduling decisions\footnote{\tiny{Probabilistic Guarantees of Finding Bugs \ }\tiny\url{https://www.microsoft.com/en-us/research/wp-content/uploads/2016/02/asplos277-pct.pdf}}
+\end{itemize}
+
+\end{frame}
+
+
+% \section{Failure analysis}
+% 
+% \begin{frame}{Diagnostics}
+% 
+% When problem already happened
+% - assertions/descriptive exceptions
+% - useful logs (always enabled, lightweight?)
+% - observability APi (jstack, jmap, access to machine). Netflix experience of brendan gregg
+% - TRIVIAL_MODE switch in source code (make your customers a favour) -- tremendously helps to limit debugging scope
+% - make your best to create regression scenario in CI/CD
+% 
+% \end{frame}
+
+
+\section{Summary: design of reliable concurrent software}
+\showTOC
+
+\begin{frame}{Reliable concurrent software: chasing the horizon}
+
+Any error must manifest itself as soon as possible:
+\begin{itemize}
+  \item Readable and complete documentation, locking policy, inheritance suggestions
+  \item External invariants (exceptions) + internal invariants (assertions)
+\end{itemize} 
+
+Use as many validation techniques as you could:
+\begin{itemize}
+  \item Unit testing
+  \item Stress testing
+  \item Execution trace analysis
+  \item Design tests to avoid false-positives
+  \item Estimate bug propability and required post-fix testing effort
+\end{itemize} 
+
+Master tools:
+\begin{itemize}
+  \item Static checks
+  \item Dynamic checks
+  \item Monitoring
+  \item Scheduling randomization
+\end{itemize} 
+
+\end{frame}
+
+
+\section{Formal methods: model checking}
+\showTOC
+
+\begin{frame}{Algorithm correctness}
+
+Use pen and paper to prove some properties.
+
+\pause
+
+We will discuss required mathematics in Lecture~\foundationsNum \ and Lecture~\foundationsPlusNum.
+
+\end{frame}
+
+
+\begin{frame}{Machine-assisted deductive verification}
+
+Provers and verifiers:
+\begin{itemize}
+  \item Coq \url{https://coq.inria.fr}
+  \item Agda \url{https://wiki.portal.chalmers.se/agda/pmwiki.php}
+  \item PVS \url{https://pvs.csl.sri.com/}
+  \item Z3 \url{https://github.com/Z3Prover/z3}
+\end{itemize}
+
+\pause
+
+There are dedicated courses on formal verification in NSU or Computer Science Center. Which are $N$ times harder than "just programming".
+
+\pause
+
+Software foundations\footnote<3->{\tiny\url{https://softwarefoundations.cis.upenn.edu/}} is $N$ times harder than SICP\footnote<3->{\tiny\url{https://en.wikipedia.org/wiki/Structure_and_Interpretation_of_Computer_Programs}}.
+
+\end{frame}
+
+
+\begin{frame}{Model checking}
+
+\textbf{This part is optional part of the course. There will be no questions related to model checking on final exam}.
+
+\pause
+
+\begin{itemize}
+  \item Hydraconf, "Java Path Finder: going to Mars without bugs and deadlocks" \ \url{https://youtu.be/dgHbSL_aDs0?si=vi81xieQ4zKRECQG}
+  \item Heisenbug, "Java Path Finder: летим на Марс без багов и дедлоков" \ \url{https://youtu.be/sQSwShW_IlI?si=ZMlKKLQxMZYhk1T7}
+\end{itemize}
+
+\end{frame}
+
+
+\begin{frame}{Summary: homework}
+
+Task \taskJCStress: JCStress basics.
+
+\end{frame}
+
+
+
+\end{document}
