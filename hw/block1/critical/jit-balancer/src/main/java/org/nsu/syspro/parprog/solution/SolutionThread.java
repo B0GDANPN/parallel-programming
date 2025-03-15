@@ -7,6 +7,21 @@ import org.nsu.syspro.parprog.external.*;
 import java.util.concurrent.*;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
 
+
+/**
+ * Решение основано на глобальном кэшировании. Имеется кэш скомпилированных методов cachedCompiledMethods:
+ * ключ - MethodId, значение - пара (скомпилированный метод, уровень L1 или L2)
+ * Имеется кэш кол-ва вызовов методов hotness. В решении поддерживается синхронизованность методов put и
+ * get для этих кэшей через Locks, для улучшения производительности был выбран ReentrantReadWriteLock для каждого кэша.
+ * Если метод был вызван >10_000 раз и он имеет уровень <L2, то он компилируется до L2.
+ * Если метод был вызван >5_000 и <=10_000 раз и он интерпретируется, то компилируется до L1.
+ * Иначе он либо интерпретируется (мало вызовов), либо исполняется.
+ * Компилирование происходит в несколько потоков (ограничение compilationThreadBound).
+ * <p>
+ * Недостаток - плохой performance, так как глобальные кэши используют
+ * синхронизованные методы, то все потоки ожидают одного.
+ * Преимущество - простота.
+ */
 public class SolutionThread extends UserThread {
     // TODO: add fields here!
     private static final ConcurrentHashMap<MethodID, CompiledMethodInfo> cachedCompiledMethods = new ConcurrentHashMap<>();
@@ -34,15 +49,13 @@ public class SolutionThread extends UserThread {
         } else if (hotLevel > 5_000 && cachedInfo == null) {
             level = CompilationLevel.L1;
         }
-        //lock.lock();
-        //synchronized (in) {
+
         if (level != null) {
             CompiledMethod method = multiThreadCompiler.compile(id, level);
             putMethods(id, new CompiledMethodInfo(method, level));
             return exec.execute(method);
         }
-        //}
-        //lock.unlock();
+
         return cachedInfo != null
                 ? exec.execute(cachedInfo.method)
                 : exec.interpret(id);
