@@ -3,14 +3,13 @@ package org.nsu.syspro.parprog.solution;
 import org.nsu.syspro.parprog.UserThread;
 import org.nsu.syspro.parprog.external.*;
 
-
 import java.util.concurrent.*;
 
 /***
- * Решение использует глобальное кэширование из 2-х кэшей для методов( метод - (уровень, скомп.метод))
+ * Решение использует глобальное кэширование из 2-х кэшей для методов( метод - (уровень, скомп. метод))
  * и счётчик кол-ва вызовов метода. Они представлены ConcurrentHashMap и операции get, put безопасны.<br>
  * Описание решения:<br>
- * Увеличивается стётчик вызовов, проверяется кэш методов:<br>
+ * Увеличивается счётчик вызовов, проверяется кэш методов:<br>
  *  если >10_000 и уровень компиляции меньше L2, то происходит асинхронная компиляция до L2.<br>
  *  если >5_000 && <=10_000 и уровень меньше L1, то асинхронная компиляция до L1.<br>
  *  в противном случае метод остаётся интерпретируемым.<br>
@@ -20,8 +19,10 @@ import java.util.concurrent.*;
 public class SolutionThread extends UserThread {
     // TODO: add fields here!
     private static final ConcurrentHashMap<MethodID, CompiledMethodInfo> cachedCompiledMethods = new ConcurrentHashMap<>();
-    private final ConcurrentHashMap<MethodID, Long> hotness = new ConcurrentHashMap<>();
-    private final CompilationExecution multiThreadCompiler;
+    private static final ConcurrentHashMap<MethodID, Long> hotness = new ConcurrentHashMap<>();
+    private static CompilationExecution multiThreadCompiler = null;
+
+    private static final ConcurrentHashMap<MethodID, CompletableFuture<Void>> compilingMethods = new ConcurrentHashMap<>();
 
     public SolutionThread(int compilationThreadBound, ExecutionEngine exec, CompilationEngine compiler, Runnable r) {
         super(compilationThreadBound, exec, compiler, r);
@@ -32,8 +33,10 @@ public class SolutionThread extends UserThread {
 
     @Override
     public ExecutionResult executeMethod(MethodID id) {
-        final long hotLevel = hotness.getOrDefault(id, 0L);
-        hotness.put(id, hotLevel + 1);
+        while (compilingMethods.containsKey(id)) {
+        }
+        Long hotLevel = hotness.getOrDefault(id, 0L);
+        hotness.compute(id, (key, value) -> value == null ? 1L : value + 1);
         CompiledMethodInfo cachedInfo = cachedCompiledMethods.get(id);
         CompilationLevel level = null;
 
@@ -82,24 +85,27 @@ public class SolutionThread extends UserThread {
         }
 
         public void asynCompile(MethodID id, CompilationLevel level) {
-            CompletableFuture.runAsync(() -> {
-                try {
-                    CompiledMethod method = (level == CompilationLevel.L1)
-                            ? engine.compile_l1(id)
-                            : engine.compile_l2(id);
 
-                    cachedCompiledMethods.compute(id, (k, oldInfo) -> {
-                        if (oldInfo == null || level.ordinal() > oldInfo.level.ordinal()) {
-                            return new CompiledMethodInfo(method, level);
-                        }
-                        return oldInfo;
-                    });
+            compilingMethods.computeIfAbsent(id, k -> {
+                CompletableFuture<Void> future = CompletableFuture.runAsync(() -> {
+                    try {
+                        CompiledMethod method = (level == CompilationLevel.L1)
+                                ? engine.compile_l1(id)
+                                : engine.compile_l2(id);
+                        cachedCompiledMethods.compute(id, (k1, old) ->
+                                (old == null || level.ordinal() > old.level.ordinal())
+                                        ? new CompiledMethodInfo(method, level)
+                                        : old
+                        );
+                    } catch (Exception e) {
+                        System.err.println(e.getMessage());
+                    } finally {
+                        compilingMethods.remove(id);
+                    }
+                }, multiThreadCompiler.executor);
 
-                } catch (Exception e) {
-                    throw new RuntimeException(e);
-                }
-            }, executor);
-
+                return future.whenComplete((v, e) -> compilingMethods.remove(id));
+            });
         }
     }
 }

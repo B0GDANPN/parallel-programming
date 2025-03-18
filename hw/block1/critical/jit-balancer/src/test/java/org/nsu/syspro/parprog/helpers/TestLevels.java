@@ -30,7 +30,7 @@ public abstract class TestLevels {
         EASY, MEDIUM, HARD
     }
 
-    private static final Level CURRENT_LEVEL = Level.MEDIUM;
+    private static final Level CURRENT_LEVEL = Level.HARD;
 
     public static boolean easyEnabled() {
         return CURRENT_LEVEL.ordinal() >= Level.EASY.ordinal();
